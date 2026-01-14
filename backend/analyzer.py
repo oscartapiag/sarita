@@ -9,6 +9,52 @@ import librosa
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from scipy.signal import butter, filtfilt
+
+
+# Per-stem bandpass filter settings (Hz)
+# Tuned to each instrument's characteristic frequency range
+STEM_FILTER_SETTINGS = {
+    "drums":  {"low": 50,  "high": 10000},  # Kick thump through cymbal shimmer
+    "bass":   {"low": 40,  "high": 5000},   # Low E fundamental through transients
+    "vocals": {"low": 80,  "high": 6000},   # Remove rumble, cut above sibilance
+    "guitar": {"low": 80,  "high": 6000},   # Body through presence
+    "piano":  {"low": 27,  "high": 5000},   # Lowest A0 note through harmonics
+    "other":  {"low": 40,  "high": 8000},   # Conservative range for misc content
+}
+
+
+def bandpass_filter(
+    waveform: np.ndarray,
+    sample_rate: int,
+    low_hz: float,
+    high_hz: float,
+    order: int = 4,
+) -> np.ndarray:
+    """
+    Apply a Butterworth bandpass filter to the waveform.
+    
+    Args:
+        waveform: Audio signal to filter
+        sample_rate: Sample rate of the audio
+        low_hz: High-pass cutoff (Hz)
+        high_hz: Low-pass cutoff (Hz)
+        order: Filter order (higher = sharper rolloff)
+        
+    Returns:
+        Filtered waveform
+    """
+    nyquist = sample_rate / 2
+    
+    # Clamp frequencies to valid range
+    low = max(low_hz / nyquist, 0.001)  # Avoid 0
+    high = min(high_hz / nyquist, 0.999)  # Must be < 1
+    
+    if low >= high:
+        return waveform  # Invalid range, return unfiltered
+    
+    b, a = butter(order, [low, high], btype='band')
+    return filtfilt(b, a, waveform)
 
 
 @dataclass
@@ -20,6 +66,7 @@ class StemEnvelope:
     sample_rate: int          # Original sample rate
     duration: float           # Duration in seconds
     fps_envelope: np.ndarray  # Envelope resampled to target FPS
+    noise_threshold: float    # Dynamic visibility threshold (noise floor * 2)
     
 
 @dataclass  
@@ -33,6 +80,7 @@ class AnalysisResult:
     other: StemEnvelope
     duration: float
     fps: int
+    analysis_fps: int  # FPS at which envelopes were calculated (for sync)
     
     def all(self) -> list[StemEnvelope]:
         """Return all envelopes as a list."""
@@ -59,13 +107,14 @@ def analyze_stem(
     """
     Analyze a single audio stem and extract its amplitude envelope.
     
-    Uses absolute peak amplitude per frame for zero-latency sync.
+    Uses RMS (Root Mean Square) for smooth, AM-style envelope that represents
+    perceived loudness rather than peak amplitude.
     
     Args:
         audio_path: Path to the stem audio file
         stem_name: Name of the stem (for labeling)
         target_fps: Target frames per second for the envelope
-        hop_length: Hop length for envelope extraction (unused, kept for API compat)
+        hop_length: Hop length for RMS calculation
         
     Returns:
         StemEnvelope containing the analysis results
@@ -74,39 +123,57 @@ def analyze_stem(
     waveform, sr = librosa.load(audio_path, sr=None, mono=True)
     duration = len(waveform) / sr
     
-    # Normalize waveform to [-1, 1]
-    max_val = np.abs(waveform).max()
-    if max_val > 0:
-        waveform = waveform / max_val
+    # Apply bandpass filter for visualization (removes noise, smooths waveform)
+    filter_settings = STEM_FILTER_SETTINGS.get(stem_name, {"low": 40, "high": 8000})
+    filtered_waveform = bandpass_filter(
+        waveform, sr, 
+        filter_settings["low"], 
+        filter_settings["high"]
+    )
     
-    # Calculate zero-latency envelope using absolute peak amplitude per frame
-    # This has no window latency unlike RMS
+    # Normalize filtered waveform to [-1, 1] for consistent visualization
+    max_val = np.max(np.abs(filtered_waveform))
+    if max_val > 0:
+        filtered_waveform = filtered_waveform / max_val
+    
+    # Calculate exact number of frames for video
     num_frames = int(duration * target_fps)
+    
+    # Use RMS for smooth envelope (measures energy, not peaks)
+    # This prevents flicker from transients like plosives
     samples_per_frame = len(waveform) // num_frames
     
-    fps_envelope = np.zeros(num_frames)
+    amplitudes = np.zeros(num_frames)
     for i in range(num_frames):
         start = i * samples_per_frame
         end = min(start + samples_per_frame, len(waveform))
         if end > start:
-            fps_envelope[i] = np.abs(waveform[start:end]).max()
+            chunk = waveform[start:end]
+            # RMS = sqrt(mean(square(waveform)))
+            amplitudes[i] = np.sqrt(np.mean(chunk ** 2))
     
-    # Light smoothing to reduce spikiness (3-frame moving average)
-    kernel = np.ones(3) / 3
-    fps_envelope = np.convolve(fps_envelope, kernel, mode='same')
+    # Rolling average smoothing (5-frame window) for weightier animation
+    kernel = np.ones(5) / 5
+    amplitudes = np.convolve(amplitudes, kernel, mode='same')
     
-    # Normalize envelope to [0, 1]
-    env_max = fps_envelope.max()
-    if env_max > 0:
-        fps_envelope = fps_envelope / env_max
+    # Normalize to [0, 1]
+    amp_max = amplitudes.max()
+    if amp_max > 0:
+        amplitudes = amplitudes / amp_max
+    
+    # Calculate initial noise threshold (15th percentile - aggressive)
+    # This will be refined by cross-stem comparison later
+    noise_floor = np.percentile(amplitudes, 15)
+    noise_threshold = noise_floor
     
     return StemEnvelope(
         name=stem_name,
-        envelope=fps_envelope,  # Same as fps_envelope now
-        waveform=waveform,
+        envelope=amplitudes,
+        waveform=filtered_waveform,  # Store filtered waveform for visualization
         sample_rate=sr,
         duration=duration,
-        fps_envelope=fps_envelope,
+        fps_envelope=amplitudes,  # Same as envelope, 1:1 with video frames
+        noise_threshold=noise_threshold,
     )
 
 
@@ -133,6 +200,28 @@ def analyze_stems(
         envelopes[stem_name] = envelope
         duration = max(duration, envelope.duration)
     
+    # Cross-stem comparison: compare each stem to the loudest one
+    # Stems that are much quieter than the loudest are likely empty/noise
+    all_maxes = {name: env.envelope.max() for name, env in envelopes.items()}
+    global_max = max(all_maxes.values()) if all_maxes else 1.0
+    
+    for stem_name, env in envelopes.items():
+        stem_max = all_maxes[stem_name]
+        
+        # If this stem's max is < 20% of the loudest stem, mark as empty
+        if stem_max < global_max * 0.2:
+            # Set threshold to 1.0 - will never show (all amplitudes are 0-1)
+            env.noise_threshold = 1.0
+        else:
+            # Use 15th percentile + cross-stem scaling
+            # Threshold is relative to both local noise floor and global context
+            local_threshold = env.noise_threshold  # Already 15th percentile
+            # Scale threshold: quieter stems get higher threshold
+            relative_loudness = stem_max / global_max  # 0.2 to 1.0
+            scaled_threshold = local_threshold / relative_loudness
+            # Minimum threshold floor of 0.15
+            env.noise_threshold = max(scaled_threshold, 0.15)
+    
     return AnalysisResult(
         drums=envelopes.get("drums"),
         bass=envelopes.get("bass"),
@@ -142,6 +231,7 @@ def analyze_stems(
         other=envelopes.get("other"),
         duration=duration,
         fps=target_fps,
+        analysis_fps=target_fps,  # Track for sync in renderer
     )
 
 

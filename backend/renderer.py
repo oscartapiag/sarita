@@ -2,7 +2,7 @@
 Oscilloscope visualization renderer using Manim.
 
 Creates animated VERTICAL waveform visualizations for each audio stem.
-Dynamic visibility: stems fade based on amplitude threshold.
+Uses Manim's native updater pattern for efficient rendering.
 """
 
 import numpy as np
@@ -22,8 +22,8 @@ STEM_COLORS = {
     "other": "#20B2AA",    # Teal
 }
 
-# Visibility threshold (0-1)
-DEFAULT_THRESHOLD = 0.1
+# Waveform display parameters  
+NUM_WAVEFORM_POINTS = 150  # Points per waveform slice
 
 
 @dataclass
@@ -32,14 +32,19 @@ class StemData:
     name: str
     color: str
     envelope: np.ndarray
-    waveform: np.ndarray
-    threshold: float = DEFAULT_THRESHOLD
+    waveform: np.ndarray      # Full filtered waveform for visualization
+    sample_rate: int          # Sample rate of the waveform
+    total_frames: int         # Total frames in the video
+    threshold: float          # Dynamic noise threshold (per-stem)
+    analysis_fps: int         # FPS of the envelope data (for time-based sync)
 
 
-class DynamicOscilloscope(Scene):
+class AMOscilloscope(Scene):
     """
-    Manim scene with VERTICAL oscilloscope lines.
-    Dynamic visibility based on amplitude.
+    AM-style oscilloscope with Manim's native updater pattern.
+    
+    Uses add_updater() for efficient frame-by-frame animation.
+    Lines get thicker when louder (key AM aesthetic).
     """
     
     def __init__(
@@ -58,130 +63,145 @@ class DynamicOscilloscope(Scene):
         self.total_frames = int(duration * fps)
         
     def construct(self):
-        """Build and animate the scene."""
+        """Build scene with updaters for efficient animation."""
         self.camera.background_color = BLACK
         
         num_stems = len(self.stems)
-        
-        # Calculate X positions for vertical lines (spread across screen)
         total_width = 12.0
         width_per_stem = total_width / num_stems
         left_x = -total_width / 2 + width_per_stem / 2
-        
-        # Line height (vertical extent)
         line_height = 5.0
         
-        # Create lines for each stem
-        lines = []
-        labels = []
-        x_positions = []
+        # Track frame count
+        self.current_frame = 0
         
+        # Create all lines with updaters
         for i, stem in enumerate(self.stems):
             x_pos = left_x + i * width_per_stem
-            x_positions.append(x_pos)
             
-            # Create vertical line
-            line = self.create_vertical_line(x_pos, line_height, stem.color)
-            lines.append(line)
-            self.add(line)
+            # Create the oscilloscope line
+            line = self._create_line(x_pos, line_height, stem.color)
             
-            # Add label below
+            # Create label if needed
+            label = None
             if self.show_labels:
                 label = Text(stem.name.capitalize(), font_size=18, color=stem.color)
                 label.move_to([x_pos, -3.2, 0])
-                labels.append(label)
                 self.add(label)
-        
-        # Animate frame by frame
-        frame_duration = 1.0 / self.target_fps
-        
-        for frame in range(self.total_frames):
-            if frame % 50 == 0:
-                print(f"\r   └── Rendering frame {frame}/{self.total_frames} ({100*frame/self.total_frames:.1f}%)", end="", flush=True)
             
-            # Update each line
-            for i, (stem, line, x_pos) in enumerate(zip(self.stems, lines, x_positions)):
-                # Get envelope value using TIME-based lookup (handles FPS mismatch)
-                current_time = frame / self.target_fps
-                env_idx = int(current_time * len(stem.envelope) / self.audio_duration)
-                env_idx = min(max(0, env_idx), len(stem.envelope) - 1)
-                envelope_val = float(stem.envelope[env_idx])
-                
-                # Dynamic visibility: calculate opacity based on envelope
-                if envelope_val > stem.threshold:
-                    opacity = min(1.0, 0.3 + envelope_val * 0.7)
-                else:
-                    opacity = envelope_val * 3  # Fade out below threshold
-                
-                # Get waveform slice
-                waveform_slice = self.get_waveform_slice(stem, frame)
-                
-                # Update vertical line with waveform
-                amplitude = envelope_val * width_per_stem * 0.4  # Horizontal displacement
-                self.update_vertical_line(line, waveform_slice, x_pos, line_height, amplitude)
-                
-                # Set opacity and width based on amplitude
-                stroke_width = 2 + envelope_val * 4
-                line.set_stroke(opacity=opacity, width=stroke_width)
-                
-                # Update label opacity
-                if self.show_labels and i < len(labels):
-                    labels[i].set_opacity(opacity)
+            # Add updater that runs every frame
+            line.add_updater(
+                self._make_line_updater(stem, x_pos, line_height, width_per_stem, label)
+            )
             
-            self.wait(frame_duration)
+            self.add(line)
         
-        print()
+        # Create a frame counter that increments each frame
+        frame_tracker = ValueTracker(0)
+        frame_tracker.add_updater(lambda m, dt: self._increment_frame())
+        self.add(frame_tracker)
+        
+        # Play for the duration
+        self.wait(self.audio_duration)
+        
+        print(f"\r   └── Rendered {self.current_frame} frames")
     
-    def create_vertical_line(self, x_pos: float, height: float, color: str, 
-                              num_points: int = 150) -> VMobject:
-        """Create a vertical line at the given x position."""
-        y_vals = np.linspace(-height/2, height/2, num_points)
+    def _increment_frame(self):
+        """Increment frame counter and show progress."""
+        self.current_frame += 1
+        if self.current_frame % 100 == 0:
+            pct = 100 * self.current_frame / self.total_frames
+            print(f"\r   └── Rendering: {pct:.1f}%", end="", flush=True)
+    
+    def _create_line(self, x_pos: float, height: float, color: str) -> VMobject:
+        """Create initial vertical line."""
+        y_vals = np.linspace(-height/2, height/2, 150)
         points = [np.array([x_pos, y, 0]) for y in y_vals]
         
         line = VMobject()
         line.set_points_as_corners(points)
-        line.set_stroke(color=color, width=3, opacity=0.8)
+        line.set_stroke(color=color, width=4, opacity=0.8)
         return line
     
-    def update_vertical_line(self, line: VMobject, waveform: np.ndarray, 
-                              x_center: float, height: float, amplitude: float,
-                              num_points: int = 150):
-        """Update vertical line with waveform displacement."""
-        # Ensure correct number of points
-        if len(waveform) != num_points:
-            indices = np.linspace(0, len(waveform) - 1, num_points).astype(int)
-            indices = np.clip(indices, 0, len(waveform) - 1)
-            waveform = waveform[indices]
+    def _make_line_updater(self, stem: StemData, x_center: float, height: float, 
+                           max_displacement: float, label: Optional[Text]):
+        """
+        Create an updater function for a specific stem line.
         
+        Returns a function that updates the line every frame based on:
+        - Current amplitude from envelope
+        - Sine wave for smooth AM-style oscillation
+        - Dynamic line thickness (louder = thicker)
+        """
+        def update_line(line: VMobject):
+            frame = self.current_frame
+            
+            # Time-based indexing (Option C): convert render frame to audio time,
+            # then to envelope index. This is robust even if FPS doesn't match.
+            playback_time = frame / self.target_fps  # seconds into the audio
+            env_idx = int(playback_time * stem.analysis_fps)  # envelope sample index
+            env_idx = min(env_idx, len(stem.envelope) - 1)
+            amplitude = float(stem.envelope[env_idx])
+            
+            # Calculate opacity based on threshold
+            # Hard cutoff - invisible when below noise floor
+            if amplitude > stem.threshold:
+                opacity = min(1.0, 0.5 + amplitude * 0.5)
+            else:
+                opacity = 0  # Completely hidden when below threshold
+            
+            # Use raw waveform from audio
+            self._update_raw_waveform(line, stem, x_center, height, amplitude, 
+                                      frame, max_displacement)
+            
+            # Constant thin line - amplitude shows via displacement size
+            target_width = 4
+            line.set_stroke(opacity=opacity, width=target_width)
+            
+            # Update label opacity
+            if label is not None:
+                label.set_opacity(opacity)
+        
+        return update_line
+    
+    def _update_raw_waveform(self, line: VMobject, stem: StemData, x_center: float, 
+                             height: float, amplitude: float, frame: int,
+                             max_displacement: float):
+        """Update line with raw audio waveform."""
+        num_points = NUM_WAVEFORM_POINTS
         y_vals = np.linspace(-height/2, height/2, num_points)
-        # Horizontal displacement based on waveform
-        x_vals = x_center + waveform * amplitude
+        
+        # Get waveform slice for this frame
+        waveform = stem.waveform
+        total_samples = len(waveform)
+        progress = frame / max(stem.total_frames, 1)
+        
+        # Calculate window position centered on current playback position
+        center_sample = int(progress * total_samples)
+        window_size = total_samples // max(stem.total_frames, 1) * 2  # 2 frames of audio
+        window_size = max(window_size, num_points * 4)  # Minimum window size
+        
+        # Extract window with bounds checking
+        start = max(0, center_sample - window_size // 2)
+        end = min(total_samples, center_sample + window_size // 2)
+        
+        window = waveform[start:end] if end > start else np.zeros(num_points)
+        
+        # Resample to target points
+        if len(window) > 0:
+            indices = np.linspace(0, len(window) - 1, num_points).astype(int)
+            wave_slice = window[indices]
+        else:
+            wave_slice = np.zeros(num_points)
+        
+        # Amplitude controls displacement size - louder = bigger horizontal waves
+        # Minimum displacement of 0.2 so waveform shape is always visible
+        amplitude_factor = 0.2 + amplitude * 0.8  # Range: 0.2 to 1.0
+        displacement = max_displacement * 0.5 * amplitude_factor * wave_slice
+        x_vals = x_center + displacement
         
         points = [np.array([x, y, 0]) for x, y in zip(x_vals, y_vals)]
         line.set_points_as_corners(points)
-    
-    def get_waveform_slice(self, stem: StemData, frame: int, num_points: int = 150) -> np.ndarray:
-        """Get a slice of the waveform for the current frame."""
-        waveform = stem.waveform
-        progress = frame / max(1, self.total_frames)
-        
-        center_sample = int(progress * len(waveform))
-        window_size = max(num_points * 4, len(waveform) // max(1, self.total_frames) * 4)
-        
-        start = max(0, center_sample - window_size // 2)
-        end = min(len(waveform), center_sample + window_size // 2)
-        
-        if end <= start:
-            return np.zeros(num_points)
-        
-        window = waveform[start:end]
-        
-        if len(window) > 0:
-            indices = np.linspace(0, len(window) - 1, num_points).astype(int)
-            indices = np.clip(indices, 0, len(window) - 1)
-            return window[indices]
-        
-        return np.zeros(num_points)
 
 
 def render_oscilloscope(
@@ -192,12 +212,21 @@ def render_oscilloscope(
     custom_colors: Optional[dict] = None,
     preview_duration: Optional[float] = None,
 ) -> Path:
-    """
-    Render the oscilloscope visualization to a video file.
-    """
+    """Render the oscilloscope visualization to a video file."""
     colors = {**STEM_COLORS, **(custom_colors or {})}
     
-    # Build stem data
+    # Get quality settings first (needed for total_frames calculation)
+    quality_settings = {
+        "low": {"pixel_height": 480, "pixel_width": 854, "frame_rate": 24},
+        "medium": {"pixel_height": 720, "pixel_width": 1280, "frame_rate": 30},
+        "high": {"pixel_height": 1080, "pixel_width": 1920, "frame_rate": 60},
+    }
+    settings = quality_settings.get(quality, quality_settings["medium"])
+    
+    duration = preview_duration if preview_duration else analysis_result.duration
+    total_frames = int(duration * settings["frame_rate"])
+    
+    # Build stem data with waveform for visualization
     stems = []
     for stem_name, envelope in analysis_result.as_dict().items():
         if envelope is None:
@@ -207,16 +236,12 @@ def render_oscilloscope(
             color=colors.get(stem_name, "#FFFFFF"),
             envelope=envelope.fps_envelope,
             waveform=envelope.waveform,
+            sample_rate=envelope.sample_rate,
+            total_frames=total_frames,
+            threshold=envelope.noise_threshold,
+            analysis_fps=analysis_result.analysis_fps,  # For time-based sync
         ))
-    
-    duration = preview_duration if preview_duration else analysis_result.duration
-    
-    quality_settings = {
-        "low": {"pixel_height": 480, "pixel_width": 854, "frame_rate": 24},
-        "medium": {"pixel_height": 720, "pixel_width": 1280, "frame_rate": 30},
-        "high": {"pixel_height": 1080, "pixel_width": 1920, "frame_rate": 60},
-    }
-    settings = quality_settings.get(quality, quality_settings["medium"])
+
     
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -231,7 +256,7 @@ def render_oscilloscope(
     print(f"   └── Rendering {len(stems)} stems at {settings['pixel_width']}x{settings['pixel_height']} @ {settings['frame_rate']}fps")
     print(f"   └── Duration: {duration:.1f}s ({int(duration * settings['frame_rate'])} frames)")
     
-    scene = DynamicOscilloscope(
+    scene = AMOscilloscope(
         stems=stems,
         duration=duration,
         fps=settings["frame_rate"],

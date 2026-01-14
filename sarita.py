@@ -146,9 +146,13 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
         raise SystemExit(1)
     
     # Step 2: Analyze audio
+    # Match analysis FPS to render FPS for proper sync (Option A)
+    fps_map = {"low": 24, "medium": 30, "high": 60}
+    render_fps = fps_map[quality]
+    
     click.echo("⏳ Step 2/4: Analyzing audio with Librosa...")
     try:
-        analysis = analyze_stems(stems.as_dict(), target_fps=60)
+        analysis = analyze_stems(stems.as_dict(), target_fps=render_fps)
         click.echo(f"   └── Duration: {analysis.duration:.1f}s, {int(analysis.duration * analysis.fps)} frames")
     except Exception as e:
         click.echo(f"❌ Error analyzing audio: {e}")
