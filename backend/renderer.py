@@ -29,8 +29,7 @@ NUM_WAVEFORM_POINTS = 150  # Points per waveform slice
 STEM_ORDER = ["drums", "bass", "guitar", "piano", "vocals", "other"]
 
 # Layout constraints
-MAX_STEM_WIDTH = 5.5  # Maximum width per stem
-MIN_STEM_WIDTH = 1.5  # Minimum separation between stems
+MAX_STEM_WIDTH = 6.0  # Maximum width per stem
 
 
 @dataclass
@@ -70,7 +69,7 @@ class AMOscilloscope(Scene):
         self.total_frames = int(duration * fps)
         
     def construct(self):
-        """Build scene with per-frame dynamic layout."""
+        """Build scene with fixed layout, per-frame opacity."""
         self.camera.background_color = BLACK
         
         num_stems = len(self.stems)
@@ -79,119 +78,71 @@ class AMOscilloscope(Scene):
             return
         
         line_height = 5.0
-        
-        # Track frame count
         self.current_frame = 0
         
-        # Shared state for dynamic positioning
-        initial_width = min(MAX_STEM_WIDTH, 12.0 / num_stems)
-        initial_left = -initial_width * num_stems / 2 + initial_width / 2
-        self.stem_positions = {
-            stem.name: initial_left + i * initial_width 
-            for i, stem in enumerate(self.stems)
-        }
-        self.stem_amplitudes = {stem.name: 0.0 for stem in self.stems}
-        self.target_positions = {}
-        self.visible_stems = []
-        self.position_lerp = 0.03  # Lower = slower, smoother sliding
+        # Fixed layout: fill available space (up to MAX_STEM_WIDTH each)
+        width_per_stem = min(MAX_STEM_WIDTH, 12.0 / num_stems)
+        group_width = width_per_stem * num_stems
+        left_x = -group_width / 2 + width_per_stem / 2
         
-        # Create lines and labels
-        self.lines = {}
-        self.labels = {}
-        
-        for stem in self.stems:
-            x_pos = self.stem_positions[stem.name]
+        # Create lines and labels at fixed positions
+        for i, stem in enumerate(self.stems):
+            x_pos = left_x + i * width_per_stem
+            
             line = self._create_line(x_pos, line_height, stem.color)
-            self.lines[stem.name] = line
             
             label = None
             if self.show_labels:
                 label = Text(stem.name.capitalize(), font_size=18, color=stem.color)
                 label.move_to([x_pos, -3.2, 0])
-                self.labels[stem.name] = label
                 self.add(label)
             
-            # Each line gets its own updater
-            line.add_updater(self._make_stem_updater(stem, line_height, label))
+            # Each line gets its own updater (fixed position, only opacity changes)
+            line.add_updater(self._make_fixed_updater(stem, x_pos, line_height, width_per_stem, label))
             self.add(line)
         
-        # Frame counter updater (updates shared state)
+        # Frame counter
         frame_tracker = ValueTracker(0)
-        frame_tracker.add_updater(lambda m, dt: self._update_shared_state())
+        frame_tracker.add_updater(lambda m, dt: self._increment_frame())
         self.add(frame_tracker)
         
         self.wait(self.audio_duration)
         print(f"\r   └── Rendered {self.current_frame} frames")
     
-    def _update_shared_state(self):
-        """Update shared state: frame count, amplitudes, visibility, and target positions."""
+    def _increment_frame(self):
+        """Increment frame counter and show progress."""
         self.current_frame += 1
-        frame = self.current_frame
-        
-        if frame % 100 == 0:
-            pct = 100 * frame / self.total_frames
+        if self.current_frame % 100 == 0:
+            pct = 100 * self.current_frame / self.total_frames
             print(f"\r   └── Rendering: {pct:.1f}%", end="", flush=True)
-        
-        # Calculate amplitudes for all stems
-        self.visible_stems = []
-        for stem in self.stems:
+    
+    def _make_fixed_updater(self, stem: StemData, x_pos: float, height: float, 
+                            max_displacement: float, label: Optional[Text]):
+        """Create an updater for fixed position stem - only opacity and waveform change."""
+        def update_line(line: VMobject):
+            frame = self.current_frame
+            
+            # Get amplitude from envelope
             playback_time = frame / self.target_fps
             env_idx = int(playback_time * stem.analysis_fps)
             env_idx = min(env_idx, len(stem.envelope) - 1)
             amplitude = float(stem.envelope[env_idx])
-            self.stem_amplitudes[stem.name] = amplitude
             
+            # Calculate opacity based on threshold
             if amplitude > stem.threshold:
-                self.visible_stems.append(stem)
-        
-        # Calculate target positions for visible stems
-        self.target_positions = {}
-        if len(self.visible_stems) > 0:
-            n = len(self.visible_stems)
-            # Ensure stems have enough space but not too much
-            width_per = max(MIN_STEM_WIDTH, min(MAX_STEM_WIDTH, 12.0 / n))
-            group_width = width_per * n
-            left_x = -group_width / 2 + width_per / 2
-            
-            for i, stem in enumerate(self.visible_stems):
-                self.target_positions[stem.name] = left_x + i * width_per
-    
-    def _make_stem_updater(self, stem: StemData, height: float, label: Optional[Text]):
-        """Create an updater for a specific stem that uses shared state."""
-        def update_line(line: VMobject):
-            frame = self.current_frame
-            amplitude = self.stem_amplitudes.get(stem.name, 0.0)
-            is_visible = stem.name in self.target_positions
-            
-            # Calculate opacity
-            if is_visible:
                 opacity = min(1.0, 0.5 + amplitude * 0.5)
             else:
                 opacity = 0
             
-            # Lerp position toward target
-            current_x = self.stem_positions[stem.name]
-            if is_visible:
-                target_x = self.target_positions[stem.name]
-                new_x = current_x + (target_x - current_x) * self.position_lerp
-                self.stem_positions[stem.name] = new_x
-            else:
-                new_x = current_x
-            
-            # Calculate max_displacement based on visible stems
-            n_visible = max(len(self.visible_stems), 1)
-            max_displacement = min(MAX_STEM_WIDTH, 12.0 / n_visible)
-            
-            # Update the waveform
-            self._update_raw_waveform(line, stem, new_x, height, amplitude, 
+            # Update the waveform at fixed position
+            self._update_raw_waveform(line, stem, x_pos, height, amplitude, 
                                       frame, max_displacement)
             
-            # Set opacity
-            line.set_stroke(opacity=opacity, width=4)
+            # Set opacity (thinner line for more detail)
+            line.set_stroke(opacity=opacity, width=3)
             
-            # Update label
+            # Update label opacity (position stays fixed)
             if label is not None:
-                label.move_to([new_x, -3.2, 0])
                 label.set_opacity(opacity)
         
         return update_line
@@ -203,7 +154,7 @@ class AMOscilloscope(Scene):
         
         line = VMobject()
         line.set_points_as_corners(points)
-        line.set_stroke(color=color, width=4, opacity=0.8)
+        line.set_stroke(color=color, width=3, opacity=0.8)
         return line
     
     def _update_raw_waveform(self, line: VMobject, stem: StemData, x_center: float, 
@@ -237,9 +188,9 @@ class AMOscilloscope(Scene):
             wave_slice = np.zeros(num_points)
         
         # Amplitude controls displacement size - louder = bigger horizontal waves
-        # Minimum displacement of 0.2 so waveform shape is always visible
-        amplitude_factor = 0.2 + amplitude * 0.8  # Range: 0.2 to 1.0
-        displacement = max_displacement * 0.5 * amplitude_factor * wave_slice
+        # Minimum displacement of 0.3 so waveform shape is always visible
+        amplitude_factor = 0.3 + amplitude * 0.7  # Range: 0.3 to 1.0
+        displacement = max_displacement * 0.7 * amplitude_factor * wave_slice
         x_vals = x_center + displacement
         
         points = [np.array([x, y, 0]) for x, y in zip(x_vals, y_vals)]
