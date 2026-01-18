@@ -213,30 +213,32 @@ def separate_stems(
     # Sources shape: (batch, num_sources, channels, samples)
     sources = sources.squeeze(0).cpu()
     
-    # Save stems
+    # Save stems in a subfolder named after the audio file
     print(f"   └── Saving stems...")
     stem_base = audio_path.stem
+    stem_folder = output_dir / stem_base
+    stem_folder.mkdir(parents=True, exist_ok=True)
     stem_paths = {}
     
     for i, stem_name in enumerate(model.sources):
-        stem_path = output_dir / f"{stem_base}_{stem_name}.wav"
+        stem_path = stem_folder / f"{stem_name}.wav"
         # Save using soundfile (channels, samples) -> need to transpose to (samples, channels)
         sf.write(stem_path, sources[i].numpy().T, model.samplerate)
         stem_paths[stem_name] = stem_path
     
     stems = StemPaths(
-        drums=stem_paths.get("drums", output_dir / f"{stem_base}_drums.wav"),
-        bass=stem_paths.get("bass", output_dir / f"{stem_base}_bass.wav"),
-        vocals=stem_paths.get("vocals", output_dir / f"{stem_base}_vocals.wav"),
-        guitar=stem_paths.get("guitar", output_dir / f"{stem_base}_guitar.wav"),
-        piano=stem_paths.get("piano", output_dir / f"{stem_base}_piano.wav"),
-        other=stem_paths.get("other", output_dir / f"{stem_base}_other.wav"),
+        drums=stem_paths.get("drums", stem_folder / "drums.wav"),
+        bass=stem_paths.get("bass", stem_folder / "bass.wav"),
+        vocals=stem_paths.get("vocals", stem_folder / "vocals.wav"),
+        guitar=stem_paths.get("guitar", stem_folder / "guitar.wav"),
+        piano=stem_paths.get("piano", stem_folder / "piano.wav"),
+        other=stem_paths.get("other", stem_folder / "other.wav"),
     )
     
     # Add to cache
     add_to_cache(file_hash, stems)
     
-    print(f"   └── Done! Stems saved to: {output_dir}")
+    print(f"   └── Done! Stems saved to: {stem_folder}")
     return stems
 
 

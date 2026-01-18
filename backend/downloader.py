@@ -200,27 +200,49 @@ def download_audio(url: str, output_dir: Path, show_progress: bool = True) -> Pa
         'quiet': True,
         'no_warnings': True,
         'progress_hooks': [progress.hook] if progress else [],
+        'overwrites': True,  # Force overwrite to prevent stale file issues
     }
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Get the prepared filename BEFORE downloading so we know exactly what file to expect
+        info = ydl.extract_info(url, download=False)
+        prepared_filename = ydl.prepare_filename(info)
+        # The filename will have the original extension, replace with .wav (postprocessor output)
+        expected_wav = Path(prepared_filename).with_suffix('.wav')
+        
+        print(f"   └── Expected output: {expected_wav}")
+        print(f"   └── Video title: {info.get('title', 'Unknown')}")
+        
+        # Now download
         ydl.download([url])
         
-        sanitized_title = sanitize_filename(title)
-        wav_path = output_dir / f"{sanitized_title}.wav"
-        
-        # yt-dlp might use the original title (not sanitized) for the file
-        # So we need to find the actual file
-        original_path = output_dir / f"{title}.wav"
-        if original_path.exists() and not wav_path.exists():
-            original_path.rename(wav_path)
-        
-        # If still not found, try to find any wav file just created
-        if not wav_path.exists():
-            wav_files = list(output_dir.glob("*.wav"))
-            if wav_files:
-                wav_path = wav_files[-1]  # Get most recent
+        # Use the prepared filename if it exists
+        if expected_wav.exists():
+            wav_path = expected_wav
+            print(f"   └── Found expected file: {wav_path}")
+        else:
+            print(f"   └── Expected file not found, using fallback...")
+            # Fallback: try sanitized title
+            sanitized_title = sanitize_filename(title)
+            wav_path = output_dir / f"{sanitized_title}.wav"
+            
+            # yt-dlp might use the original title (not sanitized) for the file
+            # So we need to find the actual file
+            original_path = output_dir / f"{title}.wav"
+            if original_path.exists() and not wav_path.exists():
+                original_path.rename(wav_path)
+            
+            # If still not found, try to find the wav file just created (by modification time)
+            if not wav_path.exists():
+                wav_files = list(output_dir.glob("*.wav"))
+                print(f"   └── Fallback: found {len(wav_files)} wav files")
+                if wav_files:
+                    # Sort by modification time and get the most recently modified file
+                    wav_path = max(wav_files, key=lambda f: f.stat().st_mtime)
+                    print(f"   └── Selected by mtime: {wav_path}")
         
         # Add to cache
+        print(f"   └── Caching: {video_id} -> {wav_path}")
         add_to_cache(video_id, wav_path)
         
         return wav_path

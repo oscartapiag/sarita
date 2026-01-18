@@ -12,13 +12,14 @@ from pathlib import Path
 
 from backend.downloader import get_video_title, download_audio, sanitize_filename
 from backend.separator import separate_stems
-from backend.analyzer import analyze_stems
+from backend.analyzer import analyze_stems, detect_key
 from backend.renderer import render_oscilloscope
 from backend.muxer import mux_audio_video
 
 
 # Project directories
 TEMP_DIR = Path("temp")
+AUDIO_DIR = Path("temp/audio")
 STEMS_DIR = Path("temp/stems")
 OUTPUT_DIR = Path("output")
 
@@ -111,7 +112,7 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
         
         click.echo("⏳ Step 0/5: Downloading audio from YouTube...")
         try:
-            audio_path = download_audio(input_source, TEMP_DIR, show_progress=True)
+            audio_path = download_audio(input_source, AUDIO_DIR, show_progress=True)
             click.echo(f"   └── Saved to: {audio_path}")
         except Exception as e:
             click.echo(f"❌ Error downloading audio: {e}")
@@ -154,6 +155,16 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
     try:
         analysis = analyze_stems(stems.as_dict(), target_fps=render_fps)
         click.echo(f"   └── Duration: {analysis.duration:.1f}s, {int(analysis.duration * analysis.fps)} frames")
+        
+        # Detect musical key from original audio
+        click.echo("   └── Detecting musical key...")
+        try:
+            key_info = detect_key(audio_path)
+            analysis.key_info = key_info
+            click.echo(f"   └── 🎵 Key: {key_info.key} {key_info.mode} (confidence: {key_info.confidence:.0%})")
+        except Exception as key_err:
+            click.echo(f"   └── ⚠️ Could not detect key: {key_err}")
+            # Continue without key detection
     except Exception as e:
         click.echo(f"❌ Error analyzing audio: {e}")
         raise SystemExit(1)

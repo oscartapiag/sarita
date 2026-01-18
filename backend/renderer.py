@@ -11,16 +11,15 @@ from dataclasses import dataclass
 from typing import Optional
 from manim import *
 
+from backend.color_palettes import get_palette_for_key, DEFAULT_COLORS
+from backend.harmonic_colors import get_frame_color
 
-# Default vibrant colors for each stem (customizable)
-STEM_COLORS = {
-    "drums": "#FF6B35",    # Orange
-    "bass": "#C41E3A",     # Deep Red  
-    "vocals": "#FFD700",   # Gold
-    "guitar": "#1E90FF",   # Electric Blue
-    "piano": "#9B59B6",    # Purple
-    "other": "#20B2AA",    # Teal
-}
+
+# Default vibrant colors for each stem (now imported from color_palettes)
+STEM_COLORS = DEFAULT_COLORS
+
+# Enable per-frame harmonic colors (can be disabled for performance)
+USE_HARMONIC_COLORS = True
 
 # Waveform display parameters  
 NUM_WAVEFORM_POINTS = 150  # Points per waveform slice
@@ -36,13 +35,18 @@ MAX_STEM_WIDTH = 6.0  # Maximum width per stem
 class StemData:
     """Data for a single stem visualization."""
     name: str
-    color: str
+    color: str                    # Base/fallback color
     envelope: np.ndarray
-    waveform: np.ndarray      # Full filtered waveform for visualization
-    sample_rate: int          # Sample rate of the waveform
-    total_frames: int         # Total frames in the video
-    threshold: float          # Dynamic noise threshold (per-stem)
-    analysis_fps: int         # FPS of the envelope data (for time-based sync)
+    waveform: np.ndarray          # Full filtered waveform for visualization
+    sample_rate: int              # Sample rate of the waveform
+    total_frames: int             # Total frames in the video
+    threshold: float              # Dynamic noise threshold (per-stem)
+    analysis_fps: int             # FPS of the envelope data (for time-based sync)
+    
+    # Harmonic features for per-frame colors (optional)
+    chroma: Optional[np.ndarray] = None              # Shape: (12, num_frames)
+    spectral_brightness: Optional[np.ndarray] = None # Shape: (num_frames,)
+    onsets: Optional[np.ndarray] = None              # Shape: (num_frames,)
 
 
 class AMOscilloscope(Scene):
@@ -138,8 +142,26 @@ class AMOscilloscope(Scene):
             self._update_raw_waveform(line, stem, x_pos, height, amplitude, 
                                       frame, max_displacement)
             
-            # Set opacity (thinner line for more detail)
-            line.set_stroke(opacity=opacity, width=3)
+            # Per-frame harmonic color (if available)
+            if USE_HARMONIC_COLORS and stem.chroma is not None:
+                # Get frame index for features (clamped to valid range)
+                feat_idx = min(frame, stem.chroma.shape[1] - 1)
+                feat_idx = max(0, feat_idx)
+                
+                chroma = stem.chroma[:, feat_idx]
+                brightness = stem.spectral_brightness[feat_idx] if stem.spectral_brightness is not None else 0.5
+                onset = stem.onsets[feat_idx] if stem.onsets is not None else 0.0
+                
+                frame_color = get_frame_color(
+                    stem_name=stem.name,
+                    chroma=chroma,
+                    spectral_brightness=brightness,
+                    onset=onset,
+                )
+                line.set_stroke(color=frame_color, opacity=opacity, width=3)
+            else:
+                # Fallback to static color
+                line.set_stroke(opacity=opacity, width=3)
             
             # Update label opacity (position stays fixed)
             if label is not None:
@@ -206,7 +228,14 @@ def render_oscilloscope(
     preview_duration: Optional[float] = None,
 ) -> Path:
     """Render the oscilloscope visualization to a video file."""
-    colors = {**STEM_COLORS, **(custom_colors or {})}
+    # Use key-based colors if available, otherwise fall back to custom/defaults
+    if hasattr(analysis_result, 'key_info') and analysis_result.key_info is not None:
+        key_colors = get_palette_for_key(analysis_result.key_info)
+        colors = {**key_colors, **(custom_colors or {})}
+        key_name = f"{analysis_result.key_info.key} {analysis_result.key_info.mode}"
+        print(f"   └── 🎵 Detected key: {key_name} (confidence: {analysis_result.key_info.confidence:.0%})")
+    else:
+        colors = {**STEM_COLORS, **(custom_colors or {})}
     
     # Get quality settings first (needed for total_frames calculation)
     quality_settings = {
@@ -233,6 +262,10 @@ def render_oscilloscope(
             total_frames=total_frames,
             threshold=envelope.noise_threshold,
             analysis_fps=analysis_result.analysis_fps,
+            # Harmonic features for per-frame colors
+            chroma=getattr(envelope, 'chroma', None),
+            spectral_brightness=getattr(envelope, 'spectral_brightness', None),
+            onsets=getattr(envelope, 'onsets', None),
         ))
     
     # Filter out completely empty stems (threshold >= 1.0 means always hidden)
