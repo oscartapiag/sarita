@@ -73,7 +73,13 @@ def is_youtube_url(url: str) -> bool:
     default=None,
     help="Only render first N seconds (for quick testing, e.g. --preview 30)"
 )
-def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quality: str, show_labels: bool, preview: float):
+@click.option(
+    "--classic",
+    is_flag=True,
+    default=False,
+    help="Use classic vertical waveform mode instead of Lissajous curves"
+)
+def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quality: str, show_labels: bool, preview: float, classic: bool):
     """
     Generate an oscilloscope music video from INPUT_SOURCE.
     
@@ -181,6 +187,7 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
             quality=quality,
             show_labels=show_labels,
             preview_duration=preview,
+            use_lissajous=not classic,
         )
         click.echo(f"   └── Rendered to: {rendered_video}")
     except Exception as e:
