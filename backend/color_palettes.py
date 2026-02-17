@@ -5,15 +5,8 @@ Maps musical keys to curated color palettes for emotionally-coherent visuals.
 """
 
 from typing import Optional
-from dataclasses import dataclass
 
-
-@dataclass
-class KeyInfo:
-    """Detected musical key information."""
-    key: str           # Key name (e.g., "C", "F#")
-    mode: str          # "major" or "minor"
-    confidence: float  # 0.0 to 1.0
+from backend.analyzer import KeyInfo
 
 
 # Default stem colors (fallback)

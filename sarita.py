@@ -7,6 +7,7 @@ separating stems and rendering animated waveforms for each instrument.
 """
 
 import re
+import shutil
 import click
 from pathlib import Path
 
@@ -17,11 +18,12 @@ from backend.renderer import render_oscilloscope
 from backend.muxer import mux_audio_video
 
 
-# Project directories
-TEMP_DIR = Path("temp")
-AUDIO_DIR = Path("temp/audio")
-STEMS_DIR = Path("temp/stems")
-OUTPUT_DIR = Path("output")
+# Project directories (relative to script location, not CWD)
+PROJECT_DIR = Path(__file__).resolve().parent
+TEMP_DIR = PROJECT_DIR / "temp"
+AUDIO_DIR = PROJECT_DIR / "temp" / "audio"
+STEMS_DIR = PROJECT_DIR / "temp" / "stems"
+OUTPUT_DIR = PROJECT_DIR / "output"
 
 
 def is_youtube_url(url: str) -> bool:
@@ -73,7 +75,13 @@ def is_youtube_url(url: str) -> bool:
     default=None,
     help="Only render first N seconds (for quick testing, e.g. --preview 30)"
 )
-def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quality: str, show_labels: bool, preview: float):
+@click.option(
+    "--classic",
+    is_flag=True,
+    default=False,
+    help="Use classic vertical waveform mode instead of Lissajous curves"
+)
+def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quality: str, show_labels: bool, preview: float, classic: bool):
     """
     Generate an oscilloscope music video from INPUT_SOURCE.
     
@@ -110,7 +118,9 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
         click.echo(f"Quality: {quality}")
         click.echo()
         
-        click.echo("⏳ Step 0/5: Downloading audio from YouTube...")
+        total_steps = 5
+        step = 1
+        click.echo(f"⏳ Step 1/{total_steps}: Downloading audio from YouTube...")
         try:
             audio_path = download_audio(input_source, AUDIO_DIR, show_progress=True)
             click.echo(f"   └── Saved to: {audio_path}")
@@ -134,11 +144,14 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
         click.echo()
         
         click.echo(f"📁 Using local file: {audio_path.name}")
-    
+        total_steps = 4
+        step = 0
+
     click.echo()
-    
-    # Step 1: Separate stems
-    click.echo("⏳ Step 1/4: Separating stems with Demucs...")
+
+    # Step: Separate stems
+    step += 1
+    click.echo(f"⏳ Step {step}/{total_steps}: Separating stems with Demucs...")
     try:
         stems = separate_stems(audio_path, STEMS_DIR, use_cuda=not no_cuda)
         click.echo(f"   └── Created: drums, bass, vocals, guitar, piano, other")
@@ -146,12 +159,13 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
         click.echo(f"❌ Error separating stems: {e}")
         raise SystemExit(1)
     
-    # Step 2: Analyze audio
+    # Step: Analyze audio
     # Match analysis FPS to render FPS for proper sync (Option A)
     fps_map = {"low": 24, "medium": 30, "high": 60}
     render_fps = fps_map[quality]
-    
-    click.echo("⏳ Step 2/4: Analyzing audio with Librosa...")
+
+    step += 1
+    click.echo(f"⏳ Step {step}/{total_steps}: Analyzing audio with Librosa...")
     try:
         analysis = analyze_stems(stems.as_dict(), target_fps=render_fps)
         click.echo(f"   └── Duration: {analysis.duration:.1f}s, {int(analysis.duration * analysis.fps)} frames")
@@ -169,8 +183,9 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
         click.echo(f"❌ Error analyzing audio: {e}")
         raise SystemExit(1)
     
-    # Step 3: Render visualization with Manim
-    click.echo("⏳ Step 3/4: Rendering oscilloscope with Manim...")
+    # Step: Render visualization with Manim
+    step += 1
+    click.echo(f"⏳ Step {step}/{total_steps}: Rendering oscilloscope with Manim...")
     if preview:
         click.echo(f"   └── Preview mode: rendering first {preview}s only")
     try:
@@ -181,6 +196,7 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
             quality=quality,
             show_labels=show_labels,
             preview_duration=preview,
+            use_lissajous=not classic,
         )
         click.echo(f"   └── Rendered to: {rendered_video}")
     except Exception as e:
@@ -189,8 +205,9 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
         traceback.print_exc()
         raise SystemExit(1)
     
-    # Step 4: Mux audio and video
-    click.echo("⏳ Step 4/4: Muxing audio with video...")
+    # Step: Mux audio and video
+    step += 1
+    click.echo(f"⏳ Step {step}/{total_steps}: Muxing audio with video...")
     try:
         # Ensure output directory exists
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -203,8 +220,22 @@ def main(input_source: str, output: Path, no_cuda: bool, keep_stems: bool, quali
     # Cleanup
     if not keep_stems:
         click.echo("🧹 Cleaning up temporary files...")
-        # TODO: Remove stem files and temp downloads
-        pass
+        try:
+            # Remove the stems subfolder for this audio
+            stems_subfolder = STEMS_DIR / audio_path.stem
+            if stems_subfolder.is_dir():
+                shutil.rmtree(stems_subfolder)
+                click.echo(f"   └── Removed stems: {stems_subfolder}")
+        except Exception as e:
+            click.echo(f"   └── Warning: could not clean stems: {e}")
+        try:
+            # Remove the temp video file
+            temp_video = TEMP_DIR / f"{output.stem}_video.mp4"
+            if temp_video.is_file():
+                temp_video.unlink()
+                click.echo(f"   └── Removed temp video: {temp_video}")
+        except Exception as e:
+            click.echo(f"   └── Warning: could not clean temp video: {e}")
     
     click.echo()
     click.echo(f"✅ Done! Video saved to: {output}")
