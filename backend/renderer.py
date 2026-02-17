@@ -94,14 +94,15 @@ class AMOscilloscope(Scene):
         show_labels: bool = False,
         **kwargs
     ):
+        self.use_lissajous = kwargs.pop('use_lissajous', LISSAJOUS_ENABLED)
         super().__init__(**kwargs)
         self.stems = stems
         self.audio_duration = duration
         self.target_fps = fps
         self.show_labels = show_labels
         self.total_frames = int(duration * fps)
-        self.use_lissajous = kwargs.pop('use_lissajous', LISSAJOUS_ENABLED)
-        
+        self._last_freqs = {}  # Per-stem frequency state: {stem_name: (freq_x, freq_y)}
+
     def construct(self):
         """Build scene with fixed layout, per-frame opacity."""
         self.camera.background_color = BLACK
@@ -214,13 +215,11 @@ class AMOscilloscope(Scene):
                     freq_x = int(round(freq_x_raw))  # Snap to integer
                     freq_x = max(1, min(5, freq_x))  # Clamp to valid range
                     
-                    # Store for next frames
-                    self._last_freq_x = freq_x
-                    self._last_freq_y = freq_y
+                    # Store for next frames (keyed by stem name)
+                    self._last_freqs[stem.name] = (freq_x, freq_y)
                 else:
                     # Hold previous shape until next onset
-                    freq_x = getattr(self, '_last_freq_x', 2)
-                    freq_y = getattr(self, '_last_freq_y', 3)
+                    freq_x, freq_y = self._last_freqs.get(stem.name, (2, 3))
             
             # Draw Lissajous curve shape with dynamic frequencies
             if self.use_lissajous:
@@ -280,7 +279,7 @@ class AMOscilloscope(Scene):
     def _create_line(self, x_pos: float, height: float, color: str) -> VMobject:
         """Create initial vertical line."""
         y_vals = np.linspace(-height/2, height/2, 150)
-        points = [np.array([x_pos, y, 0]) for y in y_vals]
+        points = np.column_stack([np.full(150, x_pos), y_vals, np.zeros(150)])
         
         line = VMobject()
         line.set_points_as_corners(points)
@@ -357,9 +356,9 @@ class AMOscilloscope(Scene):
         half_width = max_width * 0.48
         x_vals = np.clip(x_vals, x_center - half_width, x_center + half_width)
         
-        points = [np.array([x, y, 0]) for x, y in zip(x_vals, y_vals)]
+        points = np.column_stack([x_vals, y_vals, np.zeros(len(x_vals))])
         line.set_points_as_corners(points)
-    
+
     def _update_raw_waveform(self, line: VMobject, stem: StemData, x_center: float, 
                              height: float, amplitude: float, frame: int,
                              max_displacement: float):
@@ -396,7 +395,7 @@ class AMOscilloscope(Scene):
         displacement = max_displacement * 0.7 * amplitude_factor * wave_slice
         x_vals = x_center + displacement
         
-        points = [np.array([x, y, 0]) for x, y in zip(x_vals, y_vals)]
+        points = np.column_stack([x_vals, y_vals, np.zeros(len(x_vals))])
         line.set_points_as_corners(points)
 
 
